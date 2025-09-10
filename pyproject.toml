@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pydpmd"
+dynamic = ["version"]
+description = "Python data classes mirroring DPMD particle classes"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "mmccraw98", email = "mmccraw98@gmail.com"},
+]
+keywords = ["dataclasses", "numpy", "cpp-mirror", "particle-physics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers", 
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "numpy>=1.20.0",
+    "shapely>=1.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov",
+    "black",
+    "isort",
+    "flake8",
+    "mypy",
+    "pre-commit",
+]
+docs = [
+    "sphinx",
+    "sphinx-rtd-theme",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/pydpmd"  # Update with your actual repo
+Repository = "https://github.com/yourusername/pydpmd"
+Issues = "https://github.com/yourusername/pydpmd/issues"
+
+[tool.hatch.version]
+path = "src/pydpmd/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.github",
+    "/tests",
+    "/docs",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pydpmd"]
+
+# Development tools configuration
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--cov=pydpmd --cov-report=html --cov-report=term-missing"

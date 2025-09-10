@@ -1,0 +1,340 @@
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Dict, Optional, List, Union
+import numpy as np
+import h5py
+import os
+
+from ..fields import FieldSpec, IndexSpace as I, DT_FLOAT, DT_INT, NeighborMethod
+from ..trajectory import Trajectory
+# h5io utilities imported where needed to avoid circular imports
+from ..calc_utils import assign_lattice_positions
+
+@dataclass
+class GroupData:
+    arrays: Dict[str, np.ndarray] = field(default_factory=dict)
+
+
+class BaseParticle:
+    def __init__(self):
+        # Top-level fields mirroring C++ (names only; arrays filled on load)
+        self.pos: Optional[np.ndarray] = None  # (N,2)
+        self.vel: Optional[np.ndarray] = None  # (N,2)
+        self.force: Optional[np.ndarray] = None  # (N,2)
+        self.pe: Optional[np.ndarray] = None
+        self.ke: Optional[np.ndarray] = None
+        self.area: Optional[np.ndarray] = None
+
+        self.system_id: Optional[np.ndarray] = None
+        self.system_size: Optional[np.ndarray] = None
+        self.system_offset: Optional[np.ndarray] = None
+        self.box_size: Optional[np.ndarray] = None
+
+        self.packing_fraction: Optional[np.ndarray] = None
+        self.pressure: Optional[np.ndarray] = None
+        self.temperature: Optional[np.ndarray] = None
+        self.pe_total: Optional[np.ndarray] = None
+        self.ke_total: Optional[np.ndarray] = None
+
+        # HDF5 group mirrors
+        self.static = GroupData()
+        self.init = GroupData()
+        self.final = GroupData()
+        self.restart = GroupData()
+        self.trajectory: Optional[Trajectory] = None
+
+        # Dynamic FieldSpec via a function to compute expected shape (N, S) at runtime
+        self._spec_fn = lambda: {
+            "pos": FieldSpec("pos", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(), 2)),
+            "vel": FieldSpec("vel", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(), 2)),
+            "force": FieldSpec("force", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(), 2)),
+            "pe": FieldSpec("pe", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
+            "ke": FieldSpec("ke", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
+            "area": FieldSpec("area", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
+            "system_id": FieldSpec("system_id", I.Particle, DT_INT, expected_shape_fn=lambda: (self.n_particles(),)),
+            "system_size": FieldSpec("system_size", I.System, DT_INT, expected_shape_fn=lambda: (self.n_systems(),)),
+            "system_offset": FieldSpec("system_offset", I.System, DT_INT, expected_shape_fn=lambda: (self.n_systems()+1,)),
+            "box_size": FieldSpec("box_size", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(), 2)),
+            "packing_fraction": FieldSpec("packing_fraction", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
+            "pressure": FieldSpec("pressure", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
+            "temperature": FieldSpec("temperature", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
+            "pe_total": FieldSpec("pe_total", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
+            "ke_total": FieldSpec("ke_total", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
+        }
+
+        # neighbor method (python-side)
+        self.neighbor_method: Optional[NeighborMethod] = None
+
+    # ---------- Sizes ----------
+    def n_particles(self) -> int:
+        return int(self.pos.shape[0]) if self.pos is not None else 0
+
+    def n_systems(self) -> int:
+        return int(self.box_size.shape[0]) if self.box_size is not None else 0
+
+    def n_vertices(self) -> int:
+        v = getattr(self, "vertex_pos", None)
+        return int(v.shape[0]) if v is not None else 0
+
+    def n_dof(self) -> np.ndarray:
+        """Get the number of degrees of freedom for each system"""
+        raise NotImplementedError("n_dof() needs to be implemented in the derived class")
+
+
+    # ---------- Allocation ----------
+    def allocate_systems(self, S: int) -> None:
+        self.system_size = np.empty((S,), dtype=DT_INT)
+        self.system_offset = np.empty((S + 1,), dtype=DT_INT)
+        self.box_size = np.empty((S, 2), dtype=DT_FLOAT)
+        self.packing_fraction = np.zeros((S,), dtype=DT_FLOAT)
+        self.pressure = np.zeros((S,), dtype=DT_FLOAT)
+        self.temperature = np.zeros((S,), dtype=DT_FLOAT)
+        self.pe_total = np.zeros((S,), dtype=DT_FLOAT)
+        self.ke_total = np.zeros((S,), dtype=DT_FLOAT)
+
+    def allocate_particles(self, N: int) -> None:
+        self.pos = np.empty((N, 2), dtype=DT_FLOAT)
+        self.vel = np.zeros((N, 2), dtype=DT_FLOAT)
+        self.force = np.zeros((N, 2), dtype=DT_FLOAT)
+        self.pe = np.zeros((N,), dtype=DT_FLOAT)
+        self.ke = np.zeros((N,), dtype=DT_FLOAT)
+        self.area = np.zeros((N,), dtype=DT_FLOAT)
+        self.system_id = np.empty((N,), dtype=DT_INT)
+
+    def allocate_vertices(self, Nv: int) -> None:
+        # Base: no-op (poly classes override to allocate vertex arrays)
+        pass
+
+    def set_ids(self) -> None:
+        if self.n_systems() == 1:
+            self.system_id.fill(0)
+            self.system_size.fill(self.n_particles())
+        self.system_offset = np.concatenate([[0], np.cumsum(self.system_size)]).astype(DT_INT)
+
+    def set_neighbor_method(self, neighbor_method: NeighborMethod) -> None:
+        self.neighbor_method = neighbor_method
+
+    # ---------- Loading ----------
+    # (Member load methods removed; use standalone h5io.load instead)
+
+    def get_static_fields(self) -> List[str]:
+        static_fields =  ['system_id', 'system_size', 'system_offset', 'box_size']
+        if self.neighbor_method == NeighborMethod.Cell:
+            static_fields += ['cell_size', 'cell_dim', 'cell_system_start', 'verlet_skin', 'thresh2']
+        return static_fields
+    
+    def get_state_fields(self) -> List[str]:
+        state_fields = ['pe', 'ke', 'area', 'packing_fraction', 'pressure', 'temperature', 'pe_total', 'ke_total']
+        return state_fields
+
+    # ---------- Saving ----------
+    def save(self, path: str, write_static: bool = True, locations: Optional[List[str] | str] = None,
+             save_trajectory: bool = False, overwrite_trajectory: bool = True) -> None:
+        # Save to directory layout: path/meta.h5 and optionally path/trajectory.h5
+        os.makedirs(path, exist_ok=True)
+        meta_path = os.path.join(path, "meta.h5")
+        meta_file = h5py.File(meta_path, "w")
+        if write_static:
+            g = meta_file.require_group("static")
+            # also store class name for round-trip loading (under static attrs per loader expectation)
+            g.attrs["class_name"] = np.bytes_(self.__class__.__name__)
+            for name in self.get_static_fields():
+                if name in g:
+                    del g[name]
+                if getattr(self, name) is not None:
+                    g.create_dataset(name, data=getattr(self, name))
+            if self.neighbor_method is not None:
+                if "neighbor_method" in g: del g["neighbor_method"]
+                g.create_dataset(
+                    "neighbor_method",
+                    data=self.neighbor_method.name,
+                    dtype=h5py.string_dtype(encoding="utf-8")
+                )
+            # Write scalar counts for convenience
+            for key, val in (
+                ("n_particles", np.asarray(self.n_particles(), dtype=DT_INT)),
+                ("n_systems", np.asarray(self.n_systems(), dtype=DT_INT)),
+                ("n_vertices", np.asarray(self.n_vertices(), dtype=DT_INT)),
+            ):
+                if key in g: del g[key]
+                g.create_dataset(key, data=val)
+        if locations is None:
+            locations = ["init"]
+        if locations is not None:
+            if isinstance(locations, str):
+                locations = [locations]
+            for location in locations:
+                if location in meta_file:
+                    del meta_file[location]
+                g = meta_file.require_group(location)
+                for name in self.get_state_fields():
+                    if name in g:
+                        del g[name]
+                    if getattr(self, name) is not None:
+                        g.create_dataset(name, data=getattr(self, name))
+        # Optional trajectory save
+        if save_trajectory and getattr(self, "trajectory", None) is not None:
+            # Only write fields that are present in trajectory
+            traj_path = os.path.join(path, "trajectory.h5")
+            mode = "w" if overwrite_trajectory or not os.path.exists(traj_path) else "r+"
+            traj_target = h5py.File(traj_path, mode)
+            fields = self.trajectory.fields()
+            for name in fields:
+                if name in traj_target:
+                    del traj_target[name]
+                data = self.trajectory._ds[name][...]
+                traj_target.create_dataset(name, data=data)
+            traj_target.close()
+        meta_file.close()
+
+
+    # ---------- Validation ----------
+    def validate(self) -> None:
+        spec_map = self._spec_fn()
+        for name, spec in spec_map.items():
+            arr = getattr(self, name, None)
+            if arr is None:
+                continue
+            spec.validate(arr)
+            if 'offset' in name:
+                if arr[0] != 0:
+                    raise ValueError(f"offset array {name} must start with 0")
+                if np.any(arr[1:] < arr[:-1]):
+                    raise ValueError(f"offset array {name} must be monotonically increasing")
+
+    # ---------- Repr ----------
+    def __repr__(self) -> str:
+        cls = self.__class__.__name__
+        npart = self.n_particles()
+        nsys = self.n_systems()
+        nvert = self.n_vertices()
+        present = sorted([k for k, v in self._spec_fn().items() if getattr(self, k, None) is not None])
+        return f"{cls}(N={npart}, S={nsys}, Nv={nvert}, fields={present})"
+
+    # ---------- Join/Split ----------
+    # join/split moved to standalone utilities
+
+    # ---------- Internals ----------
+    def _load_group_to(self, container: GroupData, g: h5py.Group) -> None:
+        for name in g.keys():
+            arr = g[name][...]
+            container.arrays[name] = arr
+
+    def _apply_group_to_top(self, container: GroupData) -> None:
+        # Load static then override with init/final/restart semantics by caller
+        spec_map = self._spec_fn()
+        for name, arr in container.arrays.items():
+            # Defer strict validation until after all arrays are applied
+            # to avoid relying on sizes that are computed from other arrays
+            if name in spec_map:
+                setattr(self, name, arr)
+
+    # ---------- Calculations ----------
+    def calculate_area(self) -> None:
+        raise NotImplementedError("calculate_area() needs to be implemented in the derived class")
+
+    def calculate_packing_fraction(self) -> None:
+        self.calculate_area()
+        self.packing_fraction = np.array([
+            np.sum(self.area[self.system_offset[i]:self.system_offset[i+1]]) / (self.box_size[i,0] * self.box_size[i,1])
+            for i in range(self.n_systems())
+        ])
+
+    def scale_positions(self, scale: np.ndarray | float) -> None:
+        if isinstance(scale, float):
+            scale = np.full((self.n_systems(),), scale)
+        self._scale_positions_impl(scale)
+
+    def _scale_positions_impl(self, scale: np.ndarray) -> None:
+        raise NotImplementedError("_scale_positions_impl() needs to be implemented in the derived class")
+    
+    def scale_to_packing_fraction(self, packing_fraction: np.ndarray | float) -> None:
+        if isinstance(packing_fraction, float):
+            packing_fraction = np.full((self.n_systems(),), packing_fraction)
+        self.calculate_packing_fraction()
+        scale = np.sqrt(self.packing_fraction / packing_fraction)
+        self.box_size *= scale[:, None]
+        self.scale_positions(scale)
+        self.calculate_packing_fraction()
+
+    def set_positions(self, randomness: int, random_seed: int) -> None:
+        if randomness == 0:
+            # Square lattice positions
+            for i in range(self.n_systems()):
+                beg = self.system_offset[i]
+                end = self.system_offset[i+1]
+                size = self.system_size[i]
+                self.pos[beg:end] = assign_lattice_positions(size, self.box_size[i])
+        elif randomness == 1:
+            # Random uniform positions within each system's box
+            np.random.seed(random_seed)
+            for i in range(self.n_systems()):
+                beg = self.system_offset[i]
+                end = self.system_offset[i+1]
+                size = self.system_size[i]
+                self.pos[beg:end, 0] = np.random.uniform(
+                    0, self.box_size[i,0], size=size
+                )
+                self.pos[beg:end, 1] = np.random.uniform(
+                    0, self.box_size[i,1], size=size
+                )
+        self._set_positions_impl(randomness, random_seed)
+
+    def _set_positions_impl(self, randomness: int, random_seed: int) -> None:
+        raise NotImplementedError("_set_positions_impl() needs to be implemented in the derived class")
+
+    def calculate_kinetic_energy(self) -> None:
+        self._calculate_kinetic_energy_impl()
+        self.calculate_total_kinetic_energy()
+
+    def _calculate_kinetic_energy_impl(self) -> None:
+        raise NotImplementedError("_calculate_kinetic_energy_impl() needs to be implemented in the derived class")
+
+    def calculate_total_kinetic_energy(self) -> None:
+        self.ke_total = np.concatenate([
+            np.sum(self.ke[self.system_offset[i]:self.system_offset[i+1]])
+            for i in range(self.n_systems())
+        ])
+
+    def calculate_temperature(self) -> None:
+        self.calculate_kinetic_energy()
+        self.temperature = self.ke_total * 2 / self.n_dof()
+    
+    def set_velocities(self, temperature: np.ndarray | float, random_seed: int) -> None:
+        if isinstance(temperature, float):
+            temperature = np.full((self.n_systems(),), temperature)
+        if np.allclose(temperature, 0):
+            self.vel.fill(0)
+        np.random.seed(random_seed)
+        self.vel = np.concatenate([
+            np.random.normal(0, np.sqrt(temperature[i]), size=(self.system_size[i], 2))
+            for i in range(self.n_systems())
+        ])
+        self._set_velocities_impl(temperature, random_seed)
+        self.remove_center_of_mass_velocity()
+        self.calculate_temperature()
+        scale = np.sqrt(temperature / self.temperature)
+        self.scale_velocities(scale)
+
+    def _set_velocities_impl(self, temperature: np.ndarray, random_seed: int) -> None:
+        raise NotImplementedError("_set_velocities_impl() needs to be implemented in the derived class")
+
+    def scale_velocities(self, scale: np.ndarray | float) -> None:
+        if isinstance(scale, float):
+            scale = np.full((self.n_systems(),), scale)
+        self.vel *= scale[self.system_id, None]
+        self._scale_velocities_impl(scale)
+
+    def _scale_velocities_impl(self, scale: np.ndarray) -> None:
+        raise NotImplementedError("_scale_velocities_impl() needs to be implemented in the derived class")
+    
+    def remove_center_of_mass_velocity(self) -> None:
+        mean_vel = np.concatenate([
+            np.mean(self.vel[self.system_offset[i]:self.system_offset[i+1]], axis=0)
+            for i in range(self.n_systems())
+        ])
+        self.vel -= mean_vel[self.system_id]
+        self._remove_center_of_mass_velocity_impl()
+
+    def _remove_center_of_mass_velocity_impl(self) -> None:
+        raise NotImplementedError("_remove_center_of_mass_velocity_impl() needs to be implemented in the derived class")
