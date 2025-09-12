@@ -37,8 +37,9 @@ Add your class to ``CLASS_MAP`` below so it can be constructed during load:
 >>> from pydpmd.data.my_particle import MyParticle
 >>> CLASS_MAP["MyParticle"] = MyParticle
 
-When saving, ``BaseParticle.save`` writes the class name under
-``/static`` attributes as ``class_name`` for reliable round-trip loading.
+When saving, ``BaseParticle.save`` writes the class name as a dataset
+``/static/class_name`` (string) for reliable round-trip loading. Older files
+may have it under ``/static`` attributes; the loader supports both.
 """
 
 from typing import Optional, List, Union
@@ -85,19 +86,27 @@ def load(path: str, location: Optional[Union[str, List[str]]] = None, load_traje
     f = h5py.File(meta_path, "r")
     # Determine class
     cls_name = None
-
-    if MetaPaths.static in f and "class_name" in f[MetaPaths.static].attrs:
-        val = f[MetaPaths.static].attrs["class_name"]
-        if isinstance(val, bytes):
-            cls_name = val.decode("utf-8")
-        else:
-            cls_name = str(val)
-        if cls_name not in CLASS_MAP:
-            f.close()
-            raise ValueError(f"Unknown particle class '{cls_name}' in file")
-    else:
+    if MetaPaths.static in f:
+        g = f[MetaPaths.static]
+        # Prefer dataset under static, fall back to attribute for legacy files
+        if "class_name" in g:
+            val = g["class_name"][()]
+            if isinstance(val, bytes):
+                cls_name = val.decode("utf-8")
+            elif isinstance(val, np.ndarray):
+                # 0-d string dataset may come back as np.ndarray
+                cls_name = val.astype(str).item()
+            else:
+                cls_name = str(val)
+        elif "class_name" in g.attrs:
+            val = g.attrs["class_name"]
+            if isinstance(val, bytes):
+                cls_name = val.decode("utf-8")
+            else:
+                cls_name = str(val)
+    if not cls_name or cls_name not in CLASS_MAP:
         f.close()
-        raise ValueError("class_name not found in file")
+        raise ValueError("class_name not found in file or unknown class")
 
     obj = CLASS_MAP[cls_name]()
     # Load static
@@ -106,12 +115,13 @@ def load(path: str, location: Optional[Union[str, List[str]]] = None, load_traje
         obj._load_group_to(obj.static, g)
         obj._apply_group_to_top(obj.static)
         if "neighbor_method" in g:
-            val = g["neighbor_method"][...]
+            val = g["neighbor_method"][()]
             if isinstance(val, bytes):
                 val = val.decode("utf-8")
             elif isinstance(val, np.ndarray):
                 val = val.tobytes().decode("utf-8") if val.dtype.kind == 'S' else str(val)
             obj.neighbor_method = NeighborMethod[val] if val in NeighborMethod.__members__ else None
+        
     # Load state snapshot
     if location:
         if isinstance(location, str):
@@ -131,6 +141,7 @@ def load(path: str, location: Optional[Union[str, List[str]]] = None, load_traje
         if os.path.exists(traj_path):
             tf = h5py.File(traj_path, "r")
             obj.trajectory = Trajectory(tf, load_full=load_full)
+    obj.fill_in_missing_fields()
     obj.validate()
     return obj
 

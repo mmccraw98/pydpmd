@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List, Union
+from typing import Dict, Optional, List, Tuple, Any
 import numpy as np
 import h5py
 import os
@@ -13,6 +13,63 @@ from ..calc_utils import assign_lattice_positions
 @dataclass
 class GroupData:
     arrays: Dict[str, np.ndarray] = field(default_factory=dict)
+
+    def fields(self) -> Tuple[str, ...]:
+        return tuple(self.arrays.keys())
+
+    def __getitem__(self, _sel: Any) -> "GroupDataWindow":
+        # Stateless window to mirror Trajectory interface; selection is ignored
+        return GroupDataWindow(self, _sel)
+
+    def __getattr__(self, name: str) -> Any:
+        # Attribute-style direct access to stored arrays
+        if name in self.arrays:
+            if not name.isidentifier():
+                raise AttributeError(
+                    f"GroupData field '{name}' is not a valid Python identifier; access via arrays['{name}']"
+                )
+            return self.arrays[name]
+        raise AttributeError(name)
+
+    def __dir__(self) -> List[str]:
+        base = list(super().__dir__())
+        for k in self.arrays.keys():
+            if k.isidentifier():
+                base.append(k)
+        return sorted(set(base))
+
+
+@dataclass
+class GroupDataWindow:
+    base: GroupData
+    sel: Any
+
+    def __repr__(self) -> str:
+        return f"GroupDataWindow(fields={self.fields()})"
+
+    def fields(self) -> Tuple[str, ...]:
+        return self.base.fields()
+
+    def __getitem__(self, key: str) -> np.ndarray:
+        if key not in self.base.arrays:
+            raise KeyError(key)
+        return self.base.arrays[key]
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self.base.arrays:
+            if not name.isidentifier():
+                raise AttributeError(
+                    f"GroupData field '{name}' is not a valid Python identifier; access via window['{name}']"
+                )
+            return self.base.arrays[name]
+        raise AttributeError(name)
+
+    def __dir__(self) -> List[str]:
+        base = list(super().__dir__())
+        for k in self.base.arrays.keys():
+            if k.isidentifier():
+                base.append(k)
+        return sorted(set(base))
 
 
 class BaseParticle:
@@ -115,7 +172,9 @@ class BaseParticle:
         self.neighbor_method = neighbor_method
 
     # ---------- Loading ----------
-    # (Member load methods removed; use standalone h5io.load instead)
+    def fields(self) -> List[str]:
+        # Only report fields currently available on the instance (non-None)
+        return sorted([k for k in self._spec_fn().keys() if getattr(self, k, None) is not None])
 
     def get_static_fields(self) -> List[str]:
         static_fields =  ['system_id', 'system_size', 'system_offset', 'box_size']
@@ -136,8 +195,14 @@ class BaseParticle:
         meta_file = h5py.File(meta_path, "w")
         if write_static:
             g = meta_file.require_group("static")
-            # also store class name for round-trip loading (under static attrs per loader expectation)
-            g.attrs["class_name"] = np.bytes_(self.__class__.__name__)
+            # store class name for round-trip loading as a dataset under /static
+            if "class_name" in g:
+                del g["class_name"]
+            g.create_dataset(
+                "class_name",
+                data=self.__class__.__name__,
+                dtype=h5py.string_dtype(encoding="utf-8")
+            )
             for name in self.get_static_fields():
                 if name in g:
                     del g[name]
@@ -291,7 +356,7 @@ class BaseParticle:
         raise NotImplementedError("_calculate_kinetic_energy_impl() needs to be implemented in the derived class")
 
     def calculate_total_kinetic_energy(self) -> None:
-        self.ke_total = np.concatenate([
+        self.ke_total = np.array([
             np.sum(self.ke[self.system_offset[i]:self.system_offset[i+1]])
             for i in range(self.n_systems())
         ])
@@ -329,7 +394,7 @@ class BaseParticle:
         raise NotImplementedError("_scale_velocities_impl() needs to be implemented in the derived class")
     
     def remove_center_of_mass_velocity(self) -> None:
-        mean_vel = np.concatenate([
+        mean_vel = np.array([
             np.mean(self.vel[self.system_offset[i]:self.system_offset[i+1]], axis=0)
             for i in range(self.n_systems())
         ])
@@ -338,3 +403,6 @@ class BaseParticle:
 
     def _remove_center_of_mass_velocity_impl(self) -> None:
         raise NotImplementedError("_remove_center_of_mass_velocity_impl() needs to be implemented in the derived class")
+
+    def fill_in_missing_fields(self) -> None:
+        raise NotImplementedError("fill_in_missing_fields() needs to be implemented in the derived class")

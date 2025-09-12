@@ -88,7 +88,7 @@ class RigidBumpy(BasePolyParticle):
         self.angle = np.random.uniform(0, 1, size=(self.n_particles(),)) * self.angular_period
 
     def _calculate_kinetic_energy_impl(self) -> None:
-        self.ke = 0.5 * np.sum(self.mass * np.sum(self.vel ** 2, axis=1) + self.moment_inertia * self.angular_vel ** 2)
+        self.ke = 0.5 * self.mass * np.sum(self.vel ** 2, axis=1) + self.moment_inertia * self.angular_vel ** 2
 
     def _set_velocities_impl(self, temperature: np.ndarray, random_seed: int) -> None:
         np.random.seed(random_seed)
@@ -136,3 +136,9 @@ class RigidBumpy(BasePolyParticle):
                 inner_radius * np.cos(vertex_angles),
                 inner_radius * np.sin(vertex_angles),
             ]) + self.pos[particle_ids]
+
+    def fill_in_missing_fields(self) -> None:
+        if self.angular_period is None:
+            self.angular_period = 2 * np.pi / self.n_vertices_per_particle
+            self.angular_period[self.n_vertices_per_particle == 1] = 0
+            self.angle[self.n_vertices_per_particle == 1] = 0

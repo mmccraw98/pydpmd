@@ -7,7 +7,7 @@ from .trajectory import Trajectory, ConcatTrajectory, SliceTrajectory
 from .fields import IndexSpace, DT_INT
 
 
-def join_systems(particles: List[BaseParticlePy]) -> BaseParticlePy:
+def join_systems(particles: List[BaseParticle]) -> BaseParticle:
     if not particles:
         raise ValueError("join_systems: empty list")
     # Ensure same class
@@ -15,7 +15,7 @@ def join_systems(particles: List[BaseParticlePy]) -> BaseParticlePy:
     if any(p.__class__ is not cls for p in particles):
         raise TypeError("join_systems: all particles must be of the same class")
     # Ensure same set of present arrays
-    def present_fields(p: BaseParticlePy) -> set:
+    def present_fields(p: BaseParticle) -> set:
         spec_names = set(p._spec_fn().keys())
         return {name for name in spec_names if getattr(p, name) is not None}
     ref_fields = present_fields(particles[0])
@@ -35,7 +35,7 @@ def join_systems(particles: List[BaseParticlePy]) -> BaseParticlePy:
             # handled below to remap ids
             continue
         # vertex linkage arrays handled below explicitly
-        if name in ("particle_offset", "vertex_particle_id", "vertex_system_offset", "vertex_system_size"):
+        if name in ("particle_offset", "vertex_particle_id", "vertex_system_offset", "vertex_system_size", "vertex_system_id"):
             continue
         out_arr = np.concatenate(arrays, axis=0) if arrays[0].ndim >= 1 else np.array(arrays)
         setattr(out, name, out_arr)
@@ -101,14 +101,12 @@ def join_systems(particles: List[BaseParticlePy]) -> BaseParticlePy:
 
         # vertex_system_size and vertex_system_offset
         if all(getattr(p, "vertex_system_size", None) is not None for p in particles):
-            out.vertex_system_size = np.concatenate([p.vertex_system_size for p in particles], axis=0)
-            # build offset as cumulative sum
-            vso = [0]
-            acc = 0
-            for p in particles:
-                acc += int(np.sum(p.vertex_system_size))
-                vso.append(acc)
-            out.vertex_system_offset = np.asarray(vso, dtype=DT_INT)
+            out.vertex_system_size = np.concatenate([p.vertex_system_size for p in particles], axis=0).astype(DT_INT)
+            out.vertex_system_offset = np.concatenate([[0], np.cumsum(out.vertex_system_size)], axis=0).astype(DT_INT)
+        
+        # vertex_system_id
+        if all(getattr(p, "vertex_system_id", None) is not None for p in particles):
+            out.vertex_system_id = out.system_id[out.vertex_particle_id]
 
     # Trajectory: if all inputs have trajectories with identical frames/fields, create a concatenated view
     if all(getattr(p, "trajectory", None) is not None for p in particles):
@@ -124,10 +122,10 @@ def join_systems(particles: List[BaseParticlePy]) -> BaseParticlePy:
     return out
 
 
-def split_systems(p: BaseParticlePy) -> List[BaseParticlePy]:
+def split_systems(p: BaseParticle) -> List[BaseParticle]:
     if p.system_offset is None or p.system_id is None or p.system_size is None:
         raise ValueError("split_systems: missing system arrays")
-    parts: List[BaseParticlePy] = []
+    parts: List[BaseParticle] = []
     S = len(p.system_size)
     for s in range(S):
         cls = p.__class__
@@ -159,7 +157,7 @@ def split_systems(p: BaseParticlePy) -> List[BaseParticlePy]:
         vso = getattr(p, "vertex_system_offset", None)
         if vso is not None:
             j0 = int(vso[s]); j1 = int(vso[s+1])
-            for name in ("vertex_pos", "vertex_vel", "vertex_force", "vertex_pe", "vertex_mass", "vertex_rad", "vertex_particle_id", "vertex_system_id"):
+            for name in ("vertex_pos", "vertex_vel", "vertex_force", "vertex_pe", "vertex_mass", "vertex_rad", "vertex_particle_id", "vertex_system_id", "vertex_system_size"):
                 arr = getattr(p, name, None)
                 if arr is None:
                     continue

@@ -20,6 +20,12 @@ class Trajectory:
         self.file = file
         self._ds: Dict[str, h5py.Dataset] = {}
         self._arrays: Dict[str, np.ndarray] = {}
+        # Track the most recent time selection used when accessing the trajectory lazily.
+        # If None, attribute access will default to the first frame (index 0) for lazy datasets.
+        self._current_sel: Optional[Any] = None
+        # Cache for arrays materialized for the current selection in lazy mode
+        self._current_cache: Optional[Dict[str, np.ndarray]] = None
+        self._cached_sel: Optional[Any] = None
         # If explicit field_names provided, respect them; otherwise discover all top-level datasets
         names: Iterable[str]
         if field_names is None:
@@ -58,15 +64,19 @@ class Trajectory:
 
     def frame(self, i: int) -> Dict[str, np.ndarray]:
         # Return a window view for consistency with __getitem__/slice
+        self._set_selection(i)
         return TrajectoryWindow(self, i)
 
     def __getitem__(self, slc: Any) -> "TrajectoryWindow":
         # Generic partial-load window with attribute- and dict-style access
+        self._set_selection(slc)
         return TrajectoryWindow(self, slc)
 
     def slice(self, start: int, stop: Optional[int] = None, step: Optional[int] = None) -> "TrajectoryWindow":
         # Window over a time range with attribute- and dict-style access
-        return TrajectoryWindow(self, slice(start, stop, step))
+        sel = slice(start, stop, step)
+        self._set_selection(sel)
+        return TrajectoryWindow(self, sel)
 
     # Internal helpers for composition wrappers
     def _get_frame_field(self, name: str, i: int) -> np.ndarray:
@@ -79,10 +89,39 @@ class Trajectory:
             return np.array(self._arrays[name], copy=True)
         return np.array(self._ds[name][...])
 
+    def _get_lazy_array(self, name: str) -> np.ndarray:
+        """Materialize and cache the array for the current selection in lazy mode.
+
+        Returns the same ndarray instance on repeated accesses while the selection
+        remains unchanged, satisfying reference semantics.
+        """
+        arrays = self._arrays
+        if arrays:
+            return arrays[name]
+        dsets = self._ds
+        sel = self._current_sel
+        if sel is None:
+            sel = 0
+        # Reset cache if selection changed or cache missing
+        if self._cached_sel is None or self._cached_sel != sel or self._current_cache is None:
+            self._current_cache = {}
+            self._cached_sel = sel
+        cache = self._current_cache
+        if name not in cache:
+            cache[name] = dsets[name][sel][...]
+        return cache[name]
+
+    def _set_selection(self, sel: Any) -> None:
+        """Set current selection and reset cache lazily if selection changes."""
+        if self._cached_sel is None or self._cached_sel != sel:
+            self._current_cache = None
+            self._cached_sel = None
+        self._current_sel = sel
+
     # ---------- Attribute-style access ----------
     def __getattribute__(self, name: str) -> Any:
         # Fast path for internals and dunder
-        if name.startswith("__") or name in ("_ds", "_arrays", "file", "fields", "num_frames", "load_all", "frame", "__getitem__", "slice", "_get_frame_field", "_get_full_field"):
+        if name.startswith("__") or name in ("_ds", "_arrays", "file", "fields", "num_frames", "load_all", "frame", "__getitem__", "slice", "_get_frame_field", "_get_full_field", "_current_sel", "_current_cache", "_cached_sel", "_get_lazy_array", "_set_selection"):
             return object.__getattribute__(self, name)
         # Determine available dataset names without triggering attribute recursion
         arrays = object.__getattribute__(self, "_arrays")
@@ -95,8 +134,8 @@ class Trajectory:
             # Check collision against class attributes/methods
             if hasattr(type(self), name) or name in self.__dict__:
                 raise AttributeError(f"Trajectory field '{name}' collides with an attribute; access via traj['{name}']")
-            # Return a field accessor
-            return FieldAccessor(self, name)
+            # Return array data directly, with reference semantics across accesses
+            return object.__getattribute__(self, "_get_lazy_array")(name)
         return object.__getattribute__(self, name)
 
     def __dir__(self) -> List[str]:

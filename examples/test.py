@@ -33,6 +33,8 @@ def create_2_particle_bumpy_disk_system(n_vertices: int, mu_eff: float, packing_
     rb.calculate_inertia()
     rb.scale_to_packing_fraction(packing_fraction)
 
+    rb.fill_in_missing_fields()
+
     return rb
 
 
@@ -47,14 +49,23 @@ rb.set_neighbor_method(NeighborMethod.Naive)
 joined = join_systems([rb for _ in range(n_duplicates)])
 joined.save("/home/mmccraw/dev/data/09-09-25/bumpy/in")
 
-new = load("/home/mmccraw/dev/data/09-09-25/bumpy/out", location=["final", "init", "restart"], load_trajectory=True, load_full=False)
+loaded = load("/home/mmccraw/dev/data/09-09-25/bumpy/in", location=["init"])
+print(loaded.neighbor_method)
 
-print(new.trajectory)
-print(new.trajectory.num_frames())
 
-print(new.trajectory[0:10].timestep)
+# joined.set_velocities(1e-3, 0)
 
-print(new.init)
+
+# new = load("/home/mmccraw/dev/data/09-09-25/bumpy/out", location=["final", "init", "restart"], load_trajectory=True, load_full=False)
+
+# print(new.trajectory)
+# print(new.trajectory.num_frames())
+
+# print(new.trajectory[0:10].timestep)
+
+# print(new.init)
+
+# new.set_velocities(1e-3, 0)
 
 # import h5py
 # with h5py.File("/home/mmccraw/dev/data/09-09-25/bumpy/out/trajectory.h5", "r") as f:

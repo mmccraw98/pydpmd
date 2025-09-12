@@ -25,3 +25,6 @@ class Disk(BasePointParticle):
 
     def _scale_velocities_impl(self, scale: np.ndarray) -> None:
         pass  # no-op
+
+    def fill_in_missing_fields(self) -> None:
+        pass  # no-op
