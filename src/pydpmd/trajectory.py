@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from typing import Dict, Tuple, Optional, Iterable, Any, List, Mapping, Iterator
 import h5py
 import numpy as np
+import os
+from tqdm import tqdm
 from .fields import IndexSpace
 
 
@@ -16,10 +18,11 @@ class TrajectoryView:
 
 
 class Trajectory:
-    def __init__(self, file: h5py.File, field_names: Optional[Iterable[str]] = None, load_full: bool = False):
+    def __init__(self, file: h5py.File, field_names: Optional[Iterable[str]] = None, load_full: bool = False, progress_threshold_mb: float = 500.0):
         self.file = file
         self._ds: Dict[str, h5py.Dataset] = {}
         self._arrays: Dict[str, np.ndarray] = {}
+        self._progress_threshold_mb = progress_threshold_mb
         # Track the most recent time selection used when accessing the trajectory lazily.
         # If None, attribute access will default to the first frame (index 0) for lazy datasets.
         self._current_sel: Optional[Any] = None
@@ -32,12 +35,20 @@ class Trajectory:
             names = [name for name in self.file.keys() if isinstance(self.file.get(name, None), h5py.Dataset)]
         else:
             names = field_names
-        for name in names:
-            if name in self.file and isinstance(self.file.get(name, None), h5py.Dataset):
-                if load_full:
-                    self._arrays[name] = self.file[name][...]
-                else:
-                    self._ds[name] = self.file[name]
+        
+        # Convert to list to allow progress tracking
+        names_list = [name for name in names if name in self.file and isinstance(self.file.get(name, None), h5py.Dataset)]
+        
+        # Check if we should show progress bar
+        show_progress = load_full and self._should_show_progress()
+        
+        # Load datasets with optional progress bar
+        iterator = tqdm(names_list, desc="Loading trajectory") if show_progress else names_list
+        for name in iterator:
+            if load_full:
+                self._arrays[name] = self.file[name][...]
+            else:
+                self._ds[name] = self.file[name]
 
     def __repr__(self) -> str:
         fname = getattr(self.file, 'filename', None)
@@ -56,11 +67,30 @@ class Trajectory:
             return 0
         first = next(iter(store.values()))
         return first.shape[0]
+    
+    def _should_show_progress(self) -> bool:
+        """Check if file size exceeds threshold for showing progress bar."""
+        try:
+            if hasattr(self.file, 'filename') and self.file.filename:
+                file_size_mb = os.path.getsize(self.file.filename) / (1024 * 1024)
+                return file_size_mb > self._progress_threshold_mb
+        except (OSError, AttributeError):
+            # If we can't determine file size (e.g., in-memory file), don't show progress
+            pass
+        return False
 
     def load_all(self) -> Dict[str, np.ndarray]:
         if self._arrays:
             return {k: np.array(v, copy=True) for k, v in self._arrays.items()}
-        return {k: np.array(d[...]) for k, d in self._ds.items()}
+        
+        # Check if we should show progress bar for loading
+        show_progress = self._should_show_progress() and len(self._ds) > 1
+        
+        result = {}
+        iterator = tqdm(self._ds.items(), desc="Loading all datasets") if show_progress else self._ds.items()
+        for k, d in iterator:
+            result[k] = np.array(d[...])
+        return result
 
     def frame(self, i: int) -> Dict[str, np.ndarray]:
         # Return a window view for consistency with __getitem__/slice

@@ -1,12 +1,11 @@
 """pydpmd package
 
-Top-level exports primarily re-export the data subpackage for convenience.
-Use `pydpmd.data.load` to load systems and `pydpmd.data.CLASS_MAP` to
-register particle classes.
+Top-level exports primarily re-export useful subpackages.
 """
 
 from . import data
+from . import calc
 
-__all__ = ["data"]
+__all__ = ["data", "calc"]
 
 
