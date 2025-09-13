@@ -35,7 +35,7 @@ class BasePointParticle(BaseParticle):
     
     def get_static_fields(self) -> List[str]:
         static_fields = super().get_static_fields()
-        static_fields += ['e_interaction', 'mass', 'rad']
+        static_fields += ['e_interaction', 'mass', 'rad', 'area']
         return static_fields
     
     def get_state_fields(self) -> List[str]:

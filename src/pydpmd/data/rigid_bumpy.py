@@ -45,7 +45,7 @@ class RigidBumpy(BasePolyParticle):
 
     def get_static_fields(self) -> List[str]:
         static_fields = super().get_static_fields()
-        static_fields += ['mass', 'moment_inertia']
+        static_fields += ['mass', 'moment_inertia', 'area', 'rad']
         return static_fields
     
     def get_state_fields(self) -> List[str]:
@@ -71,17 +71,17 @@ class RigidBumpy(BasePolyParticle):
             nv_rad_dist = np.column_stack([self.n_vertices_per_particle[multi_vertex_mask], self.rad[multi_vertex_mask], dist])
             for nrd in np.unique(nv_rad_dist, axis=0):
                 mask = np.all(np.isclose(nv_rad_dist, nrd), axis=1)
-                n, r, d = nrd
-                po = self.particle_offset[multi_vertex_mask][mask]
+                n, _, d = nrd
+                po = self.particle_offset[multi_vertex_mask & mask]
                 vpos = self.vertex_pos[po[0]:po[0] + int(n)]
                 vrad = self.vertex_rad[po[0]:po[0] + int(n)]
                 if n == 2:
                     if d > np.sum(vrad):  # two non-overlapping circles
-                        self.area[multi_vertex_mask][mask] = np.pi * np.sum(vrad ** 2)
+                        self.area[multi_vertex_mask[mask]] = np.pi * np.sum(vrad ** 2)
                     else:  # two overlapping circles
-                        self.area[multi_vertex_mask][mask] = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
+                        self.area[multi_vertex_mask[mask]] = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
                 else:
-                    self.area[multi_vertex_mask][mask] = unary_union([Polygon(vpos)] + [Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
+                    self.area[multi_vertex_mask[mask]] = unary_union([Polygon(vpos)] + [Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
 
     def _set_positions_impl(self, randomness: int, random_seed: int) -> None:
         np.random.seed(random_seed)

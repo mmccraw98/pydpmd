@@ -183,7 +183,7 @@ class BaseParticle:
         return static_fields
     
     def get_state_fields(self) -> List[str]:
-        state_fields = ['pe', 'ke', 'area', 'packing_fraction', 'pressure', 'temperature', 'pe_total', 'ke_total']
+        state_fields = ['pe', 'ke', 'packing_fraction', 'pressure', 'temperature', 'pe_total', 'ke_total']
         return state_fields
 
     # ---------- Saving ----------
@@ -332,8 +332,8 @@ class BaseParticle:
                 self.pos[beg:end] = assign_lattice_positions(size, self.box_size[i])
         elif randomness == 1:
             # Random uniform positions within each system's box
-            np.random.seed(random_seed)
             for i in range(self.n_systems()):
+                np.random.seed(random_seed + i)
                 beg = self.system_offset[i]
                 end = self.system_offset[i+1]
                 size = self.system_size[i]

@@ -7,10 +7,12 @@ import os
 def init_box(ax, data, step, system_id, location='trajectory'):
     if location is None:
         loc = data
+    elif location == 'trajectory':
+        loc = data.trajectory[step]
     else:
         loc = getattr(data, location)
     if 'box_size' in loc.fields():
-        box_size = loc[step].box_size[system_id]
+        box_size = loc.box_size[system_id]
     elif 'box_size' in data.fields():
         box_size = data.box_size[system_id]
     else:
@@ -24,16 +26,18 @@ def init_box(ax, data, step, system_id, location='trajectory'):
 def get_pos_rad_ids(data, step, system_id, which, location='trajectory'):
     if location is None:
         loc = data
+    elif location == 'trajectory':
+        loc = data.trajectory[step]
     else:
         loc = getattr(data, location)
     if which == 'vertex':
         mask = data.vertex_system_id == system_id
         if 'vertex_pos' in loc.fields():
-            pos = loc[step].vertex_pos[mask]
+            pos = loc.vertex_pos[mask]
         else:
             raise ValueError(f"vertex_pos not found in {location} or base fields")
         if 'vertex_rad' in loc.fields():
-            rad = loc[step].vertex_rad[mask]
+            rad = loc.vertex_rad[mask]
         elif 'vertex_rad' in data.fields():
             rad = data.vertex_rad[mask]
         else:
@@ -42,11 +46,11 @@ def get_pos_rad_ids(data, step, system_id, which, location='trajectory'):
     elif which == 'particle':
         mask = data.system_id == system_id
         if 'pos' in loc.fields():
-            pos = loc[step].pos[mask]
+            pos = loc.pos[mask]
         else:
             raise ValueError(f"pos not found in {location}")
         if 'rad' in loc.fields():
-            rad = loc[step].rad[mask]
+            rad = loc.rad[mask]
         elif 'rad' in data.fields():
             rad = data.rad[mask]
         else:
