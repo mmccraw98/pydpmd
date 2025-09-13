@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Tuple, Any
+from typing import Set
 import numpy as np
 import h5py
 import os
@@ -101,7 +102,7 @@ class BaseParticle:
         self.trajectory: Optional[Trajectory] = None
 
         # Dynamic FieldSpec via a function to compute expected shape (N, S) at runtime
-        self._spec_fn = lambda: {
+        base_map = {
             "pos": FieldSpec("pos", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(), 2)),
             "vel": FieldSpec("vel", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(), 2)),
             "force": FieldSpec("force", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(), 2)),
@@ -118,9 +119,13 @@ class BaseParticle:
             "pe_total": FieldSpec("pe_total", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
             "ke_total": FieldSpec("ke_total", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
         }
+        self._spec_fn = lambda m=base_map: m
 
         # neighbor method (python-side)
         self.neighbor_method: Optional[NeighborMethod] = None
+
+        # Track dynamically added fields that should be saved under static
+        self._extra_static_fields: Set[str] = set()
 
     # ---------- Sizes ----------
     def n_particles(self) -> int:
@@ -180,6 +185,9 @@ class BaseParticle:
         static_fields =  ['system_id', 'system_size', 'system_offset', 'box_size']
         if self.neighbor_method == NeighborMethod.Cell:
             static_fields += ['cell_size', 'cell_dim', 'cell_system_start', 'verlet_skin', 'thresh2']
+        # Include any dynamically added arrays requested to be stored under static
+        if getattr(self, "_extra_static_fields", None):
+            static_fields += sorted(list(self._extra_static_fields))
         return static_fields
     
     def get_state_fields(self) -> List[str]:
@@ -293,10 +301,112 @@ class BaseParticle:
             # to avoid relying on sizes that are computed from other arrays
             if name in spec_map:
                 setattr(self, name, arr)
+                continue
+            # Auto-register unknown arrays if their leading dimension matches
+            # a known index space (System, Particle, or Vertex)
+            if isinstance(arr, np.ndarray) and arr.ndim >= 1:
+                leading = int(arr.shape[0])
+                idx_space: Optional[I] = None
+                # Use current sizes
+                n_sys = self.n_systems()
+                n_par = self.n_particles()
+                n_ver = self.n_vertices()
+                if leading == n_sys and n_sys > 0:
+                    idx_space = I.System
+                elif leading == n_par and n_par > 0:
+                    idx_space = I.Particle
+                elif leading == n_ver and n_ver > 0:
+                    idx_space = I.Vertex
+                if idx_space is not None:
+                    # Register new FieldSpec with dynamic expected shape
+                    tail_shape = arr.shape[1:]
+                    def _make_expected_shape_fn(space: I, tail: Tuple[int, ...]):
+                        return (lambda s=space, t=tail: ((
+                            (self.n_systems() if s == I.System else (
+                                self.n_particles() if s == I.Particle else (
+                                    self.n_vertices() if s == I.Vertex else 0
+                                )
+                            )),
+                        ) + t))
+                    spec_map[name] = FieldSpec(
+                        name=name,
+                        index_space=idx_space,
+                        dtype=arr.dtype,
+                        expected_shape_fn=_make_expected_shape_fn(idx_space, tail_shape),
+                    )
+                    setattr(self, name, arr)
+                    # If this came from the static group, ensure we save it back under static
+                    if container is getattr(self, 'static', None):
+                        self._extra_static_fields.add(name)
 
     # ---------- Calculations ----------
     def calculate_area(self) -> None:
         raise NotImplementedError("calculate_area() needs to be implemented in the derived class")
+
+    # ---------- Dynamic Arrays ----------
+    def add_array(self, arr: np.ndarray, name: str) -> None:
+        """Dynamically attach a new array and register it for validation and save.
+
+        The array must have leading dimension equal to one of:
+          - number of systems (System index space)
+          - number of particles (Particle index space)
+          - number of vertices (Vertex index space)
+
+        The field is added to the spec map with a dynamic expected shape,
+        and included in the static field list so it is saved under /static.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("add_array: name must be a non-empty string")
+        if not isinstance(arr, np.ndarray):
+            raise TypeError("add_array: arr must be a numpy.ndarray")
+        if arr.ndim < 1:
+            raise ValueError("add_array: array must be at least 1-D with leading dimension matching a known index space")
+
+        # Determine index space by matching the leading dimension
+        leading = int(arr.shape[0])
+        n_sys = self.n_systems()
+        n_par = self.n_particles()
+        n_ver = self.n_vertices()
+        if leading == n_sys and n_sys > 0:
+            idx_space = I.System
+            lead_dim_fn = self.n_systems
+        elif leading == n_par and n_par > 0:
+            idx_space = I.Particle
+            lead_dim_fn = self.n_particles
+        elif leading == n_ver and n_ver > 0:
+            idx_space = I.Vertex
+            lead_dim_fn = self.n_vertices
+        else:
+            raise ValueError(
+                f"add_array: cannot infer index space for '{name}' with shape {arr.shape}; "
+                f"leading dimension must match number of systems ({n_sys}), particles ({n_par}), or vertices ({n_ver})"
+            )
+
+        # Register FieldSpec with dynamic expected shape (leading dimension varies with system/particle/vertex counts)
+        tail_shape = arr.shape[1:]
+        expected_shape_fn = lambda t=tail_shape, f=lead_dim_fn: (f(),) + t
+
+        # Update spec map in place so derived classes that captured base_map still see this
+        spec_map = self._spec_fn()
+        if name in spec_map:
+            # If already present, ensure compatibility
+            existing = spec_map[name]
+            if existing.index_space != idx_space:
+                raise ValueError(f"add_array: field '{name}' already exists with different index space")
+            # Replace dtype/shape constraints to match provided array precisely
+            existing.dtype = arr.dtype
+            existing.expected_shape_fn = expected_shape_fn
+        else:
+            spec_map[name] = FieldSpec(
+                name=name,
+                index_space=idx_space,
+                dtype=arr.dtype,
+                expected_shape_fn=expected_shape_fn,
+            )
+
+        # Attach data and mark to be saved under static
+        setattr(self, name, arr)
+        self._extra_static_fields.add(name)
 
     def calculate_packing_fraction(self) -> None:
         self.calculate_area()

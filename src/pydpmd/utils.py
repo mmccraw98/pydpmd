@@ -1,10 +1,10 @@
 from __future__ import annotations
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Tuple
 import numpy as np
 
 from .data.base_particle import BaseParticle
-from .trajectory import Trajectory, ConcatTrajectory, SliceTrajectory
-from .fields import IndexSpace, DT_INT
+from .trajectory import ConcatTrajectory, SliceTrajectory
+from .fields import IndexSpace, DT_INT, FieldSpec
 
 
 def join_systems(particles: List[BaseParticle]) -> BaseParticle:
@@ -14,7 +14,7 @@ def join_systems(particles: List[BaseParticle]) -> BaseParticle:
     cls = particles[0].__class__
     if any(p.__class__ is not cls for p in particles):
         raise TypeError("join_systems: all particles must be of the same class")
-    # Ensure same set of present arrays
+    # Ensure same set of present arrays (dynamic aware): names present across inputs must match
     def present_fields(p: BaseParticle) -> set:
         spec_names = set(p._spec_fn().keys())
         return {name for name in spec_names if getattr(p, name) is not None}
@@ -26,8 +26,20 @@ def join_systems(particles: List[BaseParticle]) -> BaseParticle:
     out = cls()
     spec_map = out._spec_fn()
 
+    # Build union of present field names across inputs
+    name_union: set[str] = set()
+    per_name_space: Dict[str, IndexSpace] = {}
+    per_name_dtype: Dict[str, np.dtype] = {}
+    for p in particles:
+        p_spec_map = p._spec_fn()
+        for name, spec in p_spec_map.items():
+            if getattr(p, name) is not None:
+                name_union.add(name)
+                per_name_space[name] = spec.index_space
+                per_name_dtype[name] = np.dtype(spec.dtype)
+
     # Concatenate all arrays generically (including vertex arrays if present)
-    for name in spec_map.keys():
+    for name in sorted(name_union):
         arrays = [getattr(p, name) for p in particles if getattr(p, name) is not None]
         if not arrays:
             continue
@@ -39,6 +51,28 @@ def join_systems(particles: List[BaseParticle]) -> BaseParticle:
             continue
         out_arr = np.concatenate(arrays, axis=0) if arrays[0].ndim >= 1 else np.array(arrays)
         setattr(out, name, out_arr)
+        # Ensure spec exists on out for dynamic fields
+        if name not in spec_map:
+            space = per_name_space.get(name, None)
+            if space is not None:
+                tail_shape = out_arr.shape[1:]
+                def _make_expected_shape_fn(space: IndexSpace, tail: Tuple[int, ...]):
+                    return (lambda s=space, t=tail: ((
+                        (out.n_systems() if s == IndexSpace.System else (
+                            out.n_particles() if s == IndexSpace.Particle else (
+                                out.n_vertices() if s == IndexSpace.Vertex else 0
+                            )
+                        )),
+                    ) + t))
+                spec_map[name] = FieldSpec(
+                    name=name,
+                    index_space=space,
+                    dtype=per_name_dtype.get(name, arrays[0].dtype),
+                    expected_shape_fn=_make_expected_shape_fn(space, tail_shape),
+                )
+                # Preserve static marking if consistent
+                if all(hasattr(p, "_extra_static_fields") and (name in getattr(p, "_extra_static_fields")) for p in particles):
+                    getattr(out, "_extra_static_fields", set()).add(name)
 
     # Remap system arrays
     total_systems = 0
@@ -131,9 +165,32 @@ def split_systems(p: BaseParticle) -> List[BaseParticle]:
         cls = p.__class__
         q = cls()
         i0 = int(p.system_offset[s]); i1 = int(p.system_offset[s+1])
-        spec_map = q._spec_fn()
+        # Ensure q knows about dynamic fields present on p
+        p_spec_map = p._spec_fn()
+        q_spec_map = q._spec_fn()
+        for name, pspec in p_spec_map.items():
+            if name not in q_spec_map and getattr(p, name, None) is not None:
+                parr = getattr(p, name)
+                tail_shape = parr.shape[1:] if hasattr(parr, 'shape') and parr is not None and parr.ndim >= 1 else ()
+                def _make_expected_shape_fn(space: IndexSpace, tail: Tuple[int, ...]):
+                    return (lambda s=space, t=tail: ((
+                        (q.n_systems() if s == IndexSpace.System else (
+                            q.n_particles() if s == IndexSpace.Particle else (
+                                q.n_vertices() if s == IndexSpace.Vertex else 0
+                            )
+                        )),
+                    ) + t))
+                q_spec_map[name] = FieldSpec(
+                    name=name,
+                    index_space=pspec.index_space,
+                    dtype=pspec.dtype,
+                    expected_shape_fn=_make_expected_shape_fn(pspec.index_space, tail_shape),
+                )
+                if hasattr(p, "_extra_static_fields") and name in getattr(p, "_extra_static_fields"):
+                    getattr(q, "_extra_static_fields", set()).add(name)
+
         # slice each present array according to index space
-        for name in spec_map.keys():
+        for name, pspec in p_spec_map.items():
             arr = getattr(p, name, None)
             if arr is None:
                 continue
@@ -145,14 +202,17 @@ def split_systems(p: BaseParticle) -> List[BaseParticle]:
             elif name in ("system_offset",):
                 q.system_offset = np.array([0, i1-i0], dtype=DT_INT)
             else:
-                # Heuristic: particle-level arrays have length N; system-level length S; detect by matching
-                if arr.shape[0] == p.system_id.shape[0]:
+                # Use FieldSpec index space to slice
+                space = pspec.index_space
+                if space == IndexSpace.Particle and hasattr(p, "system_id") and p.system_id is not None:
                     setattr(q, name, arr[i0:i1].copy())
-                elif p.box_size is not None and arr.shape[0] == p.box_size.shape[0]:
+                elif space == IndexSpace.System and hasattr(p, "box_size") and p.box_size is not None:
                     setattr(q, name, arr[s:s+1].copy())
-                else:
-                    # leave as None if ambiguous
-                    pass
+                elif space == IndexSpace.Vertex:
+                    vso = getattr(p, "vertex_system_offset", None)
+                    if vso is not None:
+                        j0 = int(vso[s]); j1 = int(vso[s+1])
+                        setattr(q, name, arr[j0:j1].copy())
         # vertex split for poly data if present
         vso = getattr(p, "vertex_system_offset", None)
         if vso is not None:

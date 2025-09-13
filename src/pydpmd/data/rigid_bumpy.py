@@ -83,6 +83,31 @@ class RigidBumpy(BasePolyParticle):
                 else:
                     self.area[multi_vertex_mask[mask]] = unary_union([Polygon(vpos)] + [Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
 
+    def set_positions(self, randomness: int, random_seed: int) -> None:
+        pos_old = self.pos.copy()
+        angle_old = self.angle.copy()
+        super().set_positions(randomness, random_seed)
+        delta_pos = self.pos - pos_old
+        delta_angle = self.angle - angle_old
+        self.vertex_pos += delta_pos[self.vertex_particle_id]
+        self._rotate_vertices(delta_angle[self.vertex_particle_id])
+    
+    def _rotate_vertices(self, delta_angle: np.ndarray) -> None:
+        multi_vertex_mask = np.where(self.n_vertices_per_particle > 1)[0]
+        if len(multi_vertex_mask) > 0:
+            vertex_ids = np.concatenate([np.arange(self.particle_offset[i], self.particle_offset[i + 1]) for i in multi_vertex_mask])
+            particle_ids = self.vertex_particle_id[vertex_ids]
+            local_vertex_pos = self.vertex_pos[vertex_ids] - self.pos[particle_ids]
+            dtheta = delta_angle[vertex_ids]
+            cos_dtheta = np.cos(dtheta)
+            sin_dtheta = np.sin(dtheta)
+            x = local_vertex_pos[:, 0]
+            y = local_vertex_pos[:, 1]
+            rotated_x = x * cos_dtheta - y * sin_dtheta
+            rotated_y = x * sin_dtheta + y * cos_dtheta
+            rotated_vertex_pos = np.column_stack([rotated_x, rotated_y])
+            self.vertex_pos[vertex_ids] = rotated_vertex_pos + self.pos[particle_ids]
+
     def _set_positions_impl(self, randomness: int, random_seed: int) -> None:
         np.random.seed(random_seed)
         self.angle = np.random.uniform(0, 1, size=(self.n_particles(),)) * self.angular_period
