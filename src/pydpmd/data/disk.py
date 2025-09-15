@@ -9,7 +9,7 @@ class Disk(BasePointParticle):
         super().__init__()
 
     def n_dof(self) -> np.ndarray:
-        return np.full((self.n_systems(),), 2)
+        return self.system_size.copy() * 2
 
     def calculate_area(self) -> None:
         self.area = np.pi * self.rad ** 2

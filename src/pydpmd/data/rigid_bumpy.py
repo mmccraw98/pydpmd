@@ -5,7 +5,7 @@ from shapely.ops import unary_union
 from typing import List
 
 from .base_poly_particle import BasePolyParticle
-from ..fields import FieldSpec, IndexSpace as I, DT_FLOAT
+from ..fields import FieldSpec, IndexSpace as I, DT_FLOAT, DT_INT
 
 
 class RigidBumpy(BasePolyParticle):
@@ -59,7 +59,7 @@ class RigidBumpy(BasePolyParticle):
         self.angular_period[self.n_vertices_per_particle == 1] = 0
     
     def n_dof(self) -> np.ndarray:
-        return np.full((self.n_systems(),), 3)
+        return np.bincount(self.system_id, weights=((self.moment_inertia > 0) + 2)).astype(DT_INT)
     
     def calculate_area(self) -> None:
         qs = 1e4
