@@ -121,6 +121,7 @@ class RigidBumpy(BasePolyParticle):
             np.random.normal(0, np.sqrt(temperature[i]), size=(self.system_size[i],))
             for i in range(self.n_systems())
         ])
+        self.angular_vel *= (self.moment_inertia > 0)[:, None]
         self.set_vertex_velocities_from_particle_velocities()
 
     def _scale_velocities_impl(self, scale: np.ndarray) -> None:
