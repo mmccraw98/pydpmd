@@ -344,7 +344,7 @@ class BaseParticle:
         raise NotImplementedError("calculate_area() needs to be implemented in the derived class")
 
     # ---------- Dynamic Arrays ----------
-    def add_array(self, arr: np.ndarray, name: str) -> None:
+    def add_array(self, arr: np.ndarray, name: str, ignore_missing_index_space: bool = False) -> None:
         """Dynamically attach a new array and register it for validation and save.
 
         The array must have leading dimension equal to one of:
@@ -377,10 +377,14 @@ class BaseParticle:
             idx_space = I.Vertex
             lead_dim_fn = self.n_vertices
         else:
-            raise ValueError(
-                f"add_array: cannot infer index space for '{name}' with shape {arr.shape}; "
-                f"leading dimension must match number of systems ({n_sys}), particles ({n_par}), or vertices ({n_ver})"
-            )
+            if ignore_missing_index_space:
+                idx_space = I.NoneSpace
+                lead_dim_fn = lambda: 0
+            else:
+                raise ValueError(
+                    f"add_array: cannot infer index space for '{name}' with shape {arr.shape}; "
+                    f"leading dimension must match number of systems ({n_sys}), particles ({n_par}), or vertices ({n_ver})"
+                )
 
         # Register FieldSpec with dynamic expected shape (leading dimension varies with system/particle/vertex counts)
         tail_shape = arr.shape[1:]
@@ -392,7 +396,10 @@ class BaseParticle:
             # If already present, ensure compatibility
             existing = spec_map[name]
             if existing.index_space != idx_space:
-                raise ValueError(f"add_array: field '{name}' already exists with different index space")
+                if ignore_missing_index_space:
+                    existing.index_space = idx_space
+                else:
+                    raise ValueError(f"add_array: field '{name}' already exists with different index space")
             # Replace dtype/shape constraints to match provided array precisely
             existing.dtype = arr.dtype
             existing.expected_shape_fn = expected_shape_fn
