@@ -82,6 +82,8 @@ class BaseParticle:
         self.pe: Optional[np.ndarray] = None
         self.ke: Optional[np.ndarray] = None
         self.area: Optional[np.ndarray] = None
+        self.perimeter: Optional[np.ndarray] = None
+        self.shape_parameter: Optional[np.ndarray] = None
 
         self.system_id: Optional[np.ndarray] = None
         self.system_size: Optional[np.ndarray] = None
@@ -109,6 +111,8 @@ class BaseParticle:
             "pe": FieldSpec("pe", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
             "ke": FieldSpec("ke", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
             "area": FieldSpec("area", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
+            "perimeter": FieldSpec("perimeter", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
+            "shape_parameter": FieldSpec("shape_parameter", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
             "system_id": FieldSpec("system_id", I.Particle, DT_INT, expected_shape_fn=lambda: (self.n_particles(),)),
             "system_size": FieldSpec("system_size", I.System, DT_INT, expected_shape_fn=lambda: (self.n_systems(),)),
             "system_offset": FieldSpec("system_offset", I.System, DT_INT, expected_shape_fn=lambda: (self.n_systems()+1,)),
@@ -343,6 +347,12 @@ class BaseParticle:
     def calculate_area(self) -> None:
         raise NotImplementedError("calculate_area() needs to be implemented in the derived class")
 
+    def calculate_perimeter(self) -> None:
+        raise NotImplementedError("calculate_perimeter() needs to be implemented in the derived class")
+
+    def calculate_shape_parameter(self) -> None:
+        self.shape_parameter = self.perimeter ** 2 / (4 * np.pi * self.area)
+
     # ---------- Dynamic Arrays ----------
     def add_array(self, arr: np.ndarray, name: str, ignore_missing_index_space: bool = False) -> None:
         """Dynamically attach a new array and register it for validation and save.
@@ -433,7 +443,7 @@ class BaseParticle:
     def scale_to_packing_fraction(self, packing_fraction: np.ndarray | float) -> None:
         if isinstance(packing_fraction, float):
             packing_fraction = np.full((self.n_systems(),), packing_fraction)
-        self.calculate_packing_fraction()
+        self.calculate_packing_fraction()  # this is slow
         scale = np.sqrt(self.packing_fraction / packing_fraction)
         self.box_size *= scale[:, None]
         self.scale_positions(scale)

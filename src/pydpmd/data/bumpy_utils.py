@@ -39,6 +39,10 @@ def get_closest_vertex_radius_for_mu_eff(mu_eff, outer_radius, num_vertices):
         result = minimize_scalar(obj_squared, bounds=(min_vertex_radius, max_vertex_radius), method='bounded')
         return result.x if result.success else np.nan
 
+def get_closest_num_vertices_for_mu_eff_and_radii(mu_eff, outer_radius, vertex_radius, min_nv=1, max_nv=np.inf):
+    pass
+
+
 def get_closest_num_vertices_for_friction_and_segment_length(vertex_radius, outer_radius, target_segment_length, target_friction, target_num_vertices, vertex_count_offset=5, min_num_vertices=2):
     ideal_num_vertices = target_num_vertices
     min_cost = np.inf

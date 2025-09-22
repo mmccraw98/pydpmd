@@ -14,6 +14,9 @@ class Disk(BasePointParticle):
     def calculate_area(self) -> None:
         self.area = np.pi * self.rad ** 2
 
+    def calculate_perimeter(self) -> None:
+        self.perimeter = 2 * np.pi * self.rad
+
     def _set_positions_impl(self, randomness: int, random_seed: int) -> None:
         pass  # no-op
 

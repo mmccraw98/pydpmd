@@ -6,6 +6,7 @@ from typing import List
 
 from .base_poly_particle import BasePolyParticle
 from ..fields import FieldSpec, IndexSpace as I, DT_FLOAT, DT_INT
+from .bumpy_utils import calc_mu_eff
 
 
 class RigidBumpy(BasePolyParticle):
@@ -18,6 +19,9 @@ class RigidBumpy(BasePolyParticle):
         self.angular_period = None  # (N,)
         self.rad = None             # (N,)
         self.e_interaction = None   # (S,)
+        self.mu_eff = None          # (N,)
+
+        self.using_core = False  # if a particle has a core, it is treated as the last vertex
 
         base_map = getattr(self, "_spec_fn")()
         base_map.update({
@@ -27,6 +31,7 @@ class RigidBumpy(BasePolyParticle):
             "angular_period": FieldSpec("angular_period", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
             "rad": FieldSpec("rad", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
             "e_interaction": FieldSpec("e_interaction", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
+            "mu_eff": FieldSpec("mu_eff", I.Particle, DT_FLOAT, expected_shape_fn=lambda: (self.n_particles(),)),
         })
         self._spec_fn = lambda m=base_map: m
 
@@ -55,33 +60,78 @@ class RigidBumpy(BasePolyParticle):
     
     def set_ids(self) -> None:
         super().set_ids()
-        self.angular_period = 2 * np.pi / self.n_vertices_per_particle
+        self.angular_period = 2 * np.pi / (self.n_vertices_per_particle - self.using_core)
         self.angular_period[self.n_vertices_per_particle == 1] = 0
     
     def n_dof(self) -> np.ndarray:
         return np.bincount(self.system_id, weights=((self.moment_inertia > 0) + 2)).astype(DT_INT)
+
+    def calculate_mu_eff(self) -> None:
+        self.mu_eff = np.zeros_like(self.rad).astype(DT_FLOAT)
+        single_vertex_mask = np.where(self.n_vertices_per_particle == 1)[0]
+        self.mu_eff[single_vertex_mask] = 0
+        multi_vertex_mask = np.where(self.n_vertices_per_particle > 1)[0]
+        if len(multi_vertex_mask) > 0:
+            vrad_rad_nv = np.column_stack([self.vertex_rad[self.particle_offset[multi_vertex_mask]], self.rad[multi_vertex_mask], self.n_vertices_per_particle[multi_vertex_mask]])
+            for vr_r_n in np.unique(vrad_rad_nv, axis=0):
+                mask = np.all(np.isclose(vrad_rad_nv, vr_r_n), axis=1)
+                self.mu_eff[mask] = calc_mu_eff(vr_r_n[0], vr_r_n[1], vr_r_n[2])
     
     def calculate_area(self) -> None:
         qs = 1e4
+        dist_tol = 12  # neg-log-distances that are this close together are marked as unique
         single_vertex_mask = np.where(self.n_vertices_per_particle == 1)[0]
         self.area[single_vertex_mask] = np.pi * self.rad[single_vertex_mask] ** 2
         multi_vertex_mask = np.where(self.n_vertices_per_particle > 1)[0]
         if len(multi_vertex_mask) > 0:
-            dist = np.linalg.norm(self.vertex_pos[self.particle_offset[multi_vertex_mask]] - self.vertex_pos[self.particle_offset[multi_vertex_mask] + 1], axis=-1)
+            dist = np.round(np.linalg.norm(self.vertex_pos[self.particle_offset[multi_vertex_mask]] - self.vertex_pos[self.particle_offset[multi_vertex_mask] + 1], axis=-1), dist_tol)
             nv_rad_dist = np.column_stack([self.n_vertices_per_particle[multi_vertex_mask], self.rad[multi_vertex_mask], dist])
             for nrd in np.unique(nv_rad_dist, axis=0):
                 mask = np.all(np.isclose(nv_rad_dist, nrd), axis=1)
                 n, _, d = nrd
-                po = self.particle_offset[multi_vertex_mask & mask]
-                vpos = self.vertex_pos[po[0]:po[0] + int(n)]
-                vrad = self.vertex_rad[po[0]:po[0] + int(n)]
-                if n == 2:
-                    if d > np.sum(vrad):  # two non-overlapping circles
-                        self.area[multi_vertex_mask[mask]] = np.pi * np.sum(vrad ** 2)
-                    else:  # two overlapping circles
-                        self.area[multi_vertex_mask[mask]] = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
+                first_id = multi_vertex_mask[mask][0]
+                beg = self.particle_offset[first_id]
+                end = beg + int(n)
+                vpos = self.vertex_pos[beg:end]
+                vrad = self.vertex_rad[beg:end]
+                if self.using_core:  # core override
+                    self.area[multi_vertex_mask[mask]] = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
                 else:
-                    self.area[multi_vertex_mask[mask]] = unary_union([Polygon(vpos)] + [Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
+                    if n == 2:
+                        if d > np.sum(vrad):  # two non-overlapping circles
+                            self.area[multi_vertex_mask[mask]] = np.pi * np.sum(vrad ** 2)
+                        else:  # two overlapping circles
+                            self.area[multi_vertex_mask[mask]] = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
+                    else:
+                        self.area[multi_vertex_mask[mask]] = unary_union([Polygon(vpos)] + [Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).area
+
+    def calculate_perimeter(self) -> None:
+        qs = 1e4
+        dist_tol = 12  # neg-log-distances that are this close together are marked as unique
+        single_vertex_mask = np.where(self.n_vertices_per_particle == 1)[0]
+        self.area[single_vertex_mask] = np.pi * self.rad[single_vertex_mask] ** 2
+        multi_vertex_mask = np.where(self.n_vertices_per_particle > 1)[0]
+        if len(multi_vertex_mask) > 0:
+            dist = np.round(np.linalg.norm(self.vertex_pos[self.particle_offset[multi_vertex_mask]] - self.vertex_pos[self.particle_offset[multi_vertex_mask] + 1], axis=-1), dist_tol)
+            nv_rad_dist = np.column_stack([self.n_vertices_per_particle[multi_vertex_mask], self.rad[multi_vertex_mask], dist])
+            for nrd in np.unique(nv_rad_dist, axis=0):
+                mask = np.all(np.isclose(nv_rad_dist, nrd), axis=1)
+                n, _, d = nrd
+                first_id = multi_vertex_mask[mask][0]
+                beg = self.particle_offset[first_id]
+                end = beg + int(n)
+                vpos = self.vertex_pos[beg:end]
+                vrad = self.vertex_rad[beg:end]
+                if self.using_core:  # core override
+                    self.area[multi_vertex_mask[mask]] = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).perimeter
+                else:
+                    if n == 2:
+                        if d > np.sum(vrad):  # two non-overlapping circles
+                            self.area[multi_vertex_mask[mask]] = np.pi * np.sum(vrad ** 2)
+                        else:  # two overlapping circles
+                            self.area[multi_vertex_mask[mask]] = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).perimeter
+                    else:
+                        self.area[multi_vertex_mask[mask]] = unary_union([Polygon(vpos)] + [Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).perimeter
 
     def set_positions(self, randomness: int, random_seed: int) -> None:
         pos_old = self.pos.copy()
@@ -137,7 +187,8 @@ class RigidBumpy(BasePolyParticle):
         # rotation
         multi_vertex_mask = np.where(self.n_vertices_per_particle > 1)[0]
         if len(multi_vertex_mask) > 0:
-            vertex_ids = np.concatenate([np.arange(self.particle_offset[i], self.particle_offset[i + 1]) for i in multi_vertex_mask])
+            # if particle has core, be sure to discount it from the angular calculation
+            vertex_ids = np.concatenate([np.arange(self.particle_offset[i], self.particle_offset[i + 1] - self.using_core) for i in multi_vertex_mask])
             particle_ids = self.vertex_particle_id[vertex_ids]
             local_vertex_ids = vertex_ids - self.particle_offset[particle_ids]
             vertex_angles = local_vertex_ids * self.angular_period[particle_ids] + self.angle[particle_ids]
@@ -153,18 +204,23 @@ class RigidBumpy(BasePolyParticle):
         self.vertex_pos[self.particle_offset[single_vertex_mask]] = self.pos[single_vertex_mask]
         multi_vertex_mask = np.where(self.n_vertices_per_particle > 1)[0]
         if len(multi_vertex_mask) > 0:
-            vertex_ids = np.concatenate([np.arange(self.particle_offset[i], self.particle_offset[i + 1]) for i in multi_vertex_mask])
+            # set all non-core vertices (all but the last vertex of each particle, if using core) to be placed in a circle around the particle's center
+            vertex_ids = np.concatenate([np.arange(self.particle_offset[i], self.particle_offset[i + 1] - self.using_core) for i in multi_vertex_mask])
             particle_ids = self.vertex_particle_id[vertex_ids]
             local_vertex_ids = vertex_ids - self.particle_offset[particle_ids]
+            # the radius of the circle is given as the difference between the outer radius of the particle and the radius of the vertex
+            # in this way, the vertices will be tangent to the particle's outer radius
             inner_radius = self.rad[particle_ids] - self.vertex_rad[vertex_ids]
             vertex_angles = local_vertex_ids * self.angular_period[particle_ids] + self.angle[particle_ids]
             self.vertex_pos[vertex_ids] = np.column_stack([
                 inner_radius * np.cos(vertex_angles),
                 inner_radius * np.sin(vertex_angles),
             ]) + self.pos[particle_ids]
+            if self.using_core:  # if using it, set the core vertex to be at the particle's center (last vertex of each particle)
+                self.vertex_pos[self.particle_offset[1:][multi_vertex_mask] - 1] = self.pos[multi_vertex_mask]
 
     def fill_in_missing_fields(self) -> None:
         if self.angular_period is None:
-            self.angular_period = 2 * np.pi / self.n_vertices_per_particle
+            self.angular_period = 2 * np.pi / (self.n_vertices_per_particle - self.using_core)
             self.angular_period[self.n_vertices_per_particle == 1] = 0
             self.angle[self.n_vertices_per_particle == 1] = 0
