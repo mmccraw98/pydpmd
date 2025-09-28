@@ -126,14 +126,18 @@ def load(path: str, location: Optional[Union[str, List[str]]] = None, load_traje
     if location:
         if isinstance(location, str):
             location = [location]
-        for i, loc in enumerate(location):
+        loaded_locs: List[str] = []
+        # First, load each requested location group into the object's mirrors
+        for loc in location:
             if loc in f:
                 g = f[loc]
                 if not hasattr(obj, loc):
                     raise ValueError(f"Location '{loc}' not found in {obj.__class__.__name__}")
                 obj._load_group_to(getattr(obj, loc), g)
-                if i == 0:  # only apply the first location to the top-level data
-                    obj._apply_group_to_top(getattr(obj, loc))
+                loaded_locs.append(loc)
+        # Then, apply to top-level with fallback semantics: lower priority first, higher last
+        for loc in reversed(loaded_locs):
+            obj._apply_group_to_top(getattr(obj, loc))
     f.close()
     # Optionally attach trajectory
     if load_trajectory:

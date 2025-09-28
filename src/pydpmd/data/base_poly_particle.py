@@ -125,6 +125,10 @@ class BasePolyParticle(BaseParticle):
         ])
         self.pos = mean_pos[self.vertex_particle_id]
 
+    def system_sum(self, arr: np.ndarray) -> np.ndarray:
+        """Sum over the system dimension."""
+        return np.add.reduceat(arr, self.system_offset[:-1])  # reduceat assumes to sum to the last element so we need to drop the last element
+
     def calculate_uniform_vertex_mass(self) -> None:
         self.vertex_mass = (self.mass / self.n_vertices_per_particle)[self.vertex_particle_id]
 

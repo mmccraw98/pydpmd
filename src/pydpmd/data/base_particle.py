@@ -96,6 +96,12 @@ class BaseParticle:
         self.pe_total: Optional[np.ndarray] = None
         self.ke_total: Optional[np.ndarray] = None
 
+        self.cell_size: Optional[np.ndarray] = None
+        self.cell_dim: Optional[np.ndarray] = None
+        self.cell_system_start: Optional[np.ndarray] = None
+        self.neighbor_cutoff: Optional[np.ndarray] = None
+        self.thresh2: Optional[np.ndarray] = None
+
         # HDF5 group mirrors
         self.static = GroupData()
         self.init = GroupData()
@@ -122,6 +128,11 @@ class BaseParticle:
             "temperature": FieldSpec("temperature", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
             "pe_total": FieldSpec("pe_total", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
             "ke_total": FieldSpec("ke_total", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
+            "cell_size": FieldSpec("cell_size", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(), 2)),
+            "cell_dim": FieldSpec("cell_dim", I.System, DT_INT, expected_shape_fn=lambda: (self.n_systems(), 2)),
+            "cell_system_start": FieldSpec("cell_system_start", I.System, DT_INT, expected_shape_fn=lambda: (self.n_systems()+1,)),
+            "neighbor_cutoff": FieldSpec("neighbor_cutoff", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
+            "thresh2": FieldSpec("thresh2", I.System, DT_FLOAT, expected_shape_fn=lambda: (self.n_systems(),)),
         }
         self._spec_fn = lambda m=base_map: m
 
@@ -188,7 +199,7 @@ class BaseParticle:
     def get_static_fields(self) -> List[str]:
         static_fields =  ['system_id', 'system_size', 'system_offset', 'box_size']
         if self.neighbor_method == NeighborMethod.Cell:
-            static_fields += ['cell_size', 'cell_dim', 'cell_system_start', 'verlet_skin', 'thresh2']
+            static_fields += ['cell_size', 'cell_dim', 'cell_system_start', 'neighbor_cutoff', 'thresh2']
         # Include any dynamically added arrays requested to be stored under static
         if getattr(self, "_extra_static_fields", None):
             static_fields += sorted(list(self._extra_static_fields))

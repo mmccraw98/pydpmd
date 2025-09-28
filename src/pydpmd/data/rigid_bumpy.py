@@ -199,6 +199,9 @@ class RigidBumpy(BasePolyParticle):
     def set_particle_velocities_from_vertex_velocities(self) -> None:
         raise NotImplementedError("set_particle_velocities_from_vertex_velocities() needs to be implemented in the derived class")
 
+    def effective_packing_fraction(self) -> np.ndarray:
+        return self.system_sum(self.rad ** 2 * np.pi) / (self.box_size[:, 0] * self.box_size[:, 1])
+
     def set_vertices_on_particles_as_disk(self) -> None:
         single_vertex_mask = np.where(self.n_vertices_per_particle == 1)[0]
         self.vertex_pos[self.particle_offset[single_vertex_mask]] = self.pos[single_vertex_mask]

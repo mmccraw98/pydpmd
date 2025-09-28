@@ -7,7 +7,7 @@ primarily using matplotlib for creating plots and animations.
 
 from .mpl import (
     init_box,
-    get_pos_rad_ids,
+    get_pos_rad_ids_box_size,
     draw_circle,
     create_animation,
     downsample,
@@ -16,7 +16,7 @@ from .mpl import (
 
 __all__ = [
     'init_box',
-    'get_pos_rad_ids', 
+    'get_pos_rad_ids_box_size', 
     'draw_circle',
     'create_animation',
     'downsample',

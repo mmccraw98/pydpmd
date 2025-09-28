@@ -43,7 +43,7 @@ def join_systems(particles: List[BaseParticle]) -> BaseParticle:
         arrays = [getattr(p, name) for p in particles if getattr(p, name) is not None]
         if not arrays:
             continue
-        if name in ("system_id", "system_size", "system_offset"):
+        if name in ("system_id", "system_size", "system_offset", "cell_system_start"):
             # handled below to remap ids
             continue
         # vertex linkage arrays handled below explicitly
@@ -93,6 +93,8 @@ def join_systems(particles: List[BaseParticle]) -> BaseParticle:
     if sys_size_list:
         out.system_size = np.concatenate(sys_size_list, axis=0)
     out.system_offset = np.asarray(sys_offset_list, dtype=DT_INT)
+    if all(getattr(p, "cell_system_start", None) is not None for p in particles):
+        out.cell_system_start = np.concatenate([[0], np.cumsum(out.system_size)], axis=0).astype(DT_INT)
 
     # Remap vertex linkage arrays if present
     has_vertex = any(getattr(p, "vertex_pos", None) is not None for p in particles) or any(getattr(p, "particle_offset", None) is not None for p in particles)
@@ -201,6 +203,8 @@ def split_systems(p: BaseParticle) -> List[BaseParticle]:
                 q.system_size = p.system_size[s:s+1].copy()
             elif name in ("system_offset",):
                 q.system_offset = np.array([0, i1-i0], dtype=DT_INT)
+            elif name in ("cell_system_start",):
+                q.cell_system_start = np.array([0, p.cell_system_start[s+1]-p.cell_system_start[s]], dtype=DT_INT)
             else:
                 # Use FieldSpec index space to slice
                 space = pspec.index_space

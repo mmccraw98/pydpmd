@@ -23,13 +23,19 @@ def init_box(ax, data, step, system_id, location='trajectory'):
     ax.set_xticks([])
     ax.set_yticks([])
 
-def get_pos_rad_ids(data, step, system_id, which, location='trajectory'):
+def get_pos_rad_ids_box_size(data, step, system_id, which, location='trajectory'):
     if location is None:
         loc = data
     elif location == 'trajectory':
         loc = data.trajectory[step]
     else:
         loc = getattr(data, location)
+    if 'box_size' in loc.fields():
+        box_size = loc.box_size[system_id]
+    elif 'box_size' in data.fields():
+        box_size = data.box_size[system_id]
+    else:
+        raise ValueError(f"box_size not found in {location} or base fields")
     if which == 'vertex':
         mask = data.vertex_system_id == system_id
         if 'vertex_pos' in loc.fields():
@@ -58,7 +64,7 @@ def get_pos_rad_ids(data, step, system_id, which, location='trajectory'):
         ids = np.arange(pos.shape[0])
     else:
         raise ValueError("which must be either 'vertex' or 'particle'")
-    return pos, rad, ids
+    return pos, rad, ids, box_size
 
 def draw_circle(ax, pos, rad, **kwargs):
     ax.add_artist(plt.Circle(pos, rad, **kwargs))
@@ -174,7 +180,7 @@ def downsample(data, n_steps):
     return indices
 
 
-def draw_particles_frame(step, ax, data, system_id=0, which='vertex', cmap_name='viridis', location='trajectory'):
+def draw_particles_frame(step, ax, data, system_id=0, use_pbc=False, which='vertex', cmap_name='viridis', location='trajectory'):
     """
     Draw particles for a single animation frame.
     
@@ -188,6 +194,8 @@ def draw_particles_frame(step, ax, data, system_id=0, which='vertex', cmap_name=
         Trajectory data object
     system_id : int, default=0
         System ID to visualize
+    use_pbc : bool, default=False
+        Whether to use periodic boundary conditions
     which : str, default='vertex'
         Whether to draw 'vertex' or 'particle' data
     cmap_name : str, default='viridis'
@@ -197,12 +205,15 @@ def draw_particles_frame(step, ax, data, system_id=0, which='vertex', cmap_name=
     init_box(ax, data, step, system_id, location)
     
     # Get particle data
-    pos, rad, ids = get_pos_rad_ids(data, step, system_id, which, location)
+    pos, rad, ids, box_size = get_pos_rad_ids_box_size(data, step, system_id, which, location)
     
     # Set up colormap
     # TODO: make this a function: color by: id, rad, n_vertices, etc...
     cmap = plt.get_cmap(cmap_name)
     norm = plt.Normalize(min(ids), max(ids))
+
+    if use_pbc:
+        pos = np.mod(pos, box_size)
     
     # Draw particles
     for p, r, particle_id in zip(pos, rad, ids):
