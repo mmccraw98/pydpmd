@@ -153,6 +153,9 @@ def join_systems(particles: List[BaseParticle]) -> BaseParticle:
     if neighbor_methods and all(nm == neighbor_methods[0] for nm in neighbor_methods):
         out.neighbor_method = neighbor_methods[0]
 
+    # Groups: join init/final/restart by concatenation along entity dimension
+    _join_groups(particles, out)
+
     # Validate output
     out.validate()
     return out
@@ -274,8 +277,86 @@ def split_systems(p: BaseParticle) -> List[BaseParticle]:
         # Preserve neighbor_method from source
         q.neighbor_method = getattr(p, "neighbor_method", None)
 
+        # Groups: split init/final/restart using same slicing as top-level
+        _split_groups(p, q, s, i0, i1)
+
         q.validate()
         parts.append(q)
     return parts
 
+
+
+def _split_groups(p: BaseParticle, q: BaseParticle, s: int, i0: int, i1: int) -> None:
+    """Split group mirrors (init/final/restart) from p into q using the same
+    slicing logic as top-level arrays.
+
+    - Particle index space: slice [i0:i1]
+    - System index space: slice [s:s+1]
+    - Vertex index space: use vertex_system_offset if present
+    - Unknown/other: copy as-is
+    """
+    vso = getattr(p, "vertex_system_offset", None)
+    j0 = j1 = None
+    if vso is not None:
+        j0 = int(vso[s]); j1 = int(vso[s+1])
+
+    for gname in ("init", "final", "restart"):
+        src = getattr(p, gname).arrays
+        dst = getattr(q, gname).arrays
+        if not src:
+            continue
+        for name, arr in src.items():
+            # Non-array or scalar: copy through
+            if not isinstance(arr, np.ndarray) or arr.ndim == 0:
+                dst[name] = arr
+                continue
+            leading = int(arr.shape[0])
+            if leading == p.n_particles():
+                dst[name] = arr[i0:i1].copy()
+            elif leading == p.n_systems():
+                dst[name] = arr[s:s+1].copy()
+            elif j0 is not None and leading == p.n_vertices():
+                dst[name] = arr[j0:j1].copy()
+            else:
+                dst[name] = arr.copy()
+
+
+def _join_groups(particles: List[BaseParticle], out: BaseParticle) -> None:
+    """Join group mirrors (init/final/restart) across inputs into out by
+    concatenating along the entity dimension (axis 0).
+
+    All inputs must have identical group field keys per group; scalars must
+    match exactly; arrays are concatenated along axis 0.
+    """
+    if not particles:
+        return
+    for gname in ("init", "final", "restart"):
+        srcs = [getattr(p, gname).arrays for p in particles]
+        if not any(srcs):
+            continue
+        keysets = [set(s.keys()) for s in srcs]
+        if keysets and any(ks != keysets[0] for ks in keysets):
+            raise ValueError(f"join_systems: group '{gname}' fields must match across inputs")
+        keys = sorted(keysets[0]) if keysets else []
+        out_group = getattr(out, gname).arrays
+        for name in keys:
+            chunks = [s[name] for s in srcs]
+            first = chunks[0]
+            # Scalars or non-ndarray: require equality
+            if not isinstance(first, np.ndarray) or first.ndim == 0:
+                same = all(
+                    (not isinstance(c, np.ndarray) and c == first) or
+                    (isinstance(c, np.ndarray) and c.ndim == 0 and np.array_equal(c, first))
+                    for c in chunks[1:]
+                )
+                if not same:
+                    raise ValueError(f"join_systems: incompatible scalar for group field '{name}' in '{gname}'")
+                out_group[name] = first
+                continue
+            # Validate leading dim corresponds to a known index space per input
+            for p, c in zip(particles, chunks):
+                leading = int(c.shape[0])
+                if leading not in (p.n_systems(), p.n_particles(), p.n_vertices()):
+                    raise ValueError(f"join_systems: cannot infer index space for group field '{name}' on one input")
+            out_group[name] = np.concatenate(chunks, axis=0)
 
