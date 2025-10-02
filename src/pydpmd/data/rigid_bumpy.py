@@ -133,6 +133,51 @@ class RigidBumpy(BasePolyParticle):
                     else:
                         self.area[multi_vertex_mask[mask]] = unary_union([Polygon(vpos)] + [Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)]).perimeter
 
+    def calculate_inertia_uniform_mass_distribution(self) -> None:
+        qs = 1e4
+        dist_tol = 12  # neg-log-distances that are this close together are marked as unique
+        single_vertex_mask = np.where(self.n_vertices_per_particle == 1)[0]
+        self.moment_inertia[single_vertex_mask] = 0
+        multi_vertex_mask = np.where(self.n_vertices_per_particle > 1)[0]
+        if len(multi_vertex_mask) > 0:
+            dist = np.round(np.linalg.norm(self.vertex_pos[self.particle_offset[multi_vertex_mask]] - self.vertex_pos[self.particle_offset[multi_vertex_mask] + 1], axis=-1), dist_tol)
+            nv_rad_dist = np.column_stack([self.n_vertices_per_particle[multi_vertex_mask], self.rad[multi_vertex_mask], dist])
+            for nrd in np.unique(nv_rad_dist, axis=0):
+                mask = np.all(np.isclose(nv_rad_dist, nrd), axis=1)
+                n, _, d = nrd
+                first_id = multi_vertex_mask[mask][0]
+                beg = self.particle_offset[first_id]
+                end = beg + int(n)
+                vpos = self.vertex_pos[beg:end]
+                vrad = self.vertex_rad[beg:end]
+                if n == 2 and d > np.sum(vrad):
+                    # two non-overlapping circles
+                    # apply parallel axis theorem to each circle
+                    I_x_1 = np.pi / 4 * vrad[0] ** 4 + np.pi * vrad[0] ** 2 * np.linalg.norm(vpos[0] - self.pos[first_id]) ** 2
+                    I_x_2 = np.pi / 4 * vrad[1] ** 4 + np.pi * vrad[1] ** 2 * np.linalg.norm(vpos[1] - self.pos[first_id]) ** 2
+                    I_x = I_x_1 + I_x_2
+                    I_y = I_x
+                    A = np.pi * np.sum(vrad ** 2)
+                    # apply the perpindicular axis theorem
+                    I = (self.mass[first_id] / A) * (I_y + I_x)
+                    self.moment_inertia[multi_vertex_mask[mask]] = I
+                else:
+                    if n == 2:
+                        shape = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)])
+                    elif self.using_core:  # core override
+                        shape = unary_union([Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)])
+                    else:
+                        shape = unary_union([Polygon(vpos)] + [Point(_vpos).buffer(_vrad, quad_segs=qs) for _vpos, _vrad in zip(vpos, vrad)])
+                    x, y = shape.exterior.xy
+                    # subtract the particle's center of mass
+                    x -= self.pos[first_id][0]
+                    y -= self.pos[first_id][1]
+                    A = np.abs(1 / 2 * np.sum((y[:-1] + y[1:]) * (x[:-1] - x[1:])))  # area
+                    I_x = np.abs(1 / 12 * np.sum((x[:-1] * y[1:] - x[1:] * y[:-1]) * (x[:-1] ** 2 + x[:-1] * x[1:] + x[1:] ** 2)))
+                    I_y = np.abs(1 / 12 * np.sum((x[:-1] * y[1:] - x[1:] * y[:-1]) * (y[:-1] ** 2 + y[:-1] * y[1:] + y[1:] ** 2)))
+                    I = (self.mass[first_id] / A) * (I_y + I_x)  # perpindicular axis theorem
+                    self.moment_inertia[multi_vertex_mask[mask]] = I
+
     def set_positions(self, randomness: int, random_seed: int) -> None:
         pos_old = self.pos.copy()
         angle_old = self.angle.copy()
